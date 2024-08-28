@@ -4,38 +4,48 @@ import time
 import getpass
 import os
 import pathway as pw
+from pathway.xpacks.llm.llms import OpenAIChat, prompt_chat_single_qa
 
-from pathway.xpacks.llm.embedders import OpenAIEmbedder
-from pathway.xpacks.llm.splitters import TokenCountSplitter
-from pathway.xpacks.llm.vector_store import VectorStoreClient, VectorStoreServer
+#  REST Connector config.
+HTTP_HOST = os.environ.get("PATHWAY_REST_CONNECTOR_HOST", "127.0.0.1")
+HTTP_PORT = os.environ.get("PATHWAY_REST_CONNECTOR_PORT", "8080")
 
-PATHWAY_PORT = 8765
+#  LLM model parameters
+#  For OPENAI API
+API_KEY = ""
+#  Specific model from OpenAI. You can also use gpt-3.5-turbo for faster responses.
+MODEL_LOCATOR = "gpt-4"
+# Controls the stochasticity of the openai model output.
+TEMPERATURE = 0.0
+# Max completion tokens
+MAX_TOKENS = 50
 
-logging.basicConfig(stream=sys.stderr, level=logging.WARN, force=True)
 
-if "OPENAI_API_KEY" not in os.environ:
-    os.environ["OPENAI_API_KEY"] = getpass.getpass("OpenAI API Key:")
+class QueryInputSchema(pw.Schema):
+    query: str
+    user: str
 
-data_sources = []
-data_sources.append(
-    pw.io.fs.read(
-        "./sample_documents",
-        format="binary",
-        mode="streaming",
-        with_metadata=True,
-    )
+
+query, response_writer = pw.io.http.rest_connector(
+    host=HTTP_HOST,
+    port=int(HTTP_PORT),
+    schema=QueryInputSchema,
+    autocommit_duration_ms=50,
 )
 
-# Choose document transformers
-text_splitter = TokenCountSplitter()
-embedder = OpenAIEmbedder(api_key="")
-
-# The `PathwayVectorServer` is a wrapper over `pathway.xpacks.llm.vector_store` to accept LangChain transformers.
-# Feel free to fork it to develop bespoke document processing pipelines.
-vector_server = VectorStoreServer(
-    *data_sources,
-    embedder=embedder,
-    splitter=text_splitter,
+model = OpenAIChat(
+    api_key=API_KEY,
+    model=MODEL_LOCATOR,
+    temperature=TEMPERATURE,
+    max_tokens=MAX_TOKENS,
+    retry_strategy=pw.udfs.FixedDelayRetryStrategy(),
+    cache_strategy=pw.udfs.DefaultCache(),
 )
-vector_server.run_server(host="127.0.0.1", port=PATHWAY_PORT, threaded=True, with_cache=False)
-time.sleep(30)  # Workaround for Colab - messages from threads are not visible unless a cell is running
+
+response = query.select(
+    query_id=pw.this.id, result=model(prompt_chat_single_qa(pw.this.query))
+)
+
+response_writer(response)
+pw.run()
+
